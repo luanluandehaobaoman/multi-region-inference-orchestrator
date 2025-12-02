@@ -177,7 +177,8 @@ class MessageConsumer:
         self,
         duration: int = 60,
         max_messages_per_region: int = 10,
-        auto_delete: bool = True
+        auto_delete: bool = True,
+        rate: float = None
     ) -> None:
         """
         持续从所有 Region 队列消费消息
@@ -186,29 +187,74 @@ class MessageConsumer:
             duration: 持续时间（秒）
             max_messages_per_region: 每次每个队列最多接收消息数
             auto_delete: 是否自动删除
+            rate: 消费速率（条/秒），None 表示不限速
         """
-        print(f"\n🔄 开始持续消费消息（持续 {duration} 秒）...")
+        if rate:
+            print(f"\n🔄 开始速率控制消费（{rate} 条/秒，持续 {duration} 秒）...")
+        else:
+            print(f"\n🔄 开始持续消费消息（持续 {duration} 秒）...")
         print(f"从 {len(self.queue_urls)} 个 Region 队列轮询\n")
 
         start_time = time.time()
+        messages_consumed = 0
         iteration = 0
 
         while time.time() - start_time < duration:
             iteration += 1
-            print(f"\n=== 轮询 #{iteration} ===")
+            elapsed = time.time() - start_time
+
+            # 速率控制：检查是否需要暂停
+            if rate:
+                expected_consumed = int(elapsed * rate)
+                if messages_consumed >= expected_consumed:
+                    # 已经超过预期消费量，需要等待
+                    wait_time = (messages_consumed / rate) - elapsed
+                    if wait_time > 0.1:
+                        time.sleep(wait_time)
+                        continue
+
+            print(f"\n=== 轮询 #{iteration} (已消费 {messages_consumed} 条) ===")
 
             for region in self.queue_urls.keys():
-                messages = self.receive_messages(region, max_messages_per_region, wait_time=5)
+                # 动态调整每次拉取的消息数
+                if rate:
+                    elapsed = time.time() - start_time
+                    expected = int(elapsed * rate)
+                    remaining_quota = expected - messages_consumed
+                    fetch_size = min(max_messages_per_region, max(1, remaining_quota))
+                else:
+                    fetch_size = max_messages_per_region
+
+                messages = self.receive_messages(region, fetch_size, wait_time=1)
 
                 if messages:
                     print(f"[{region}] 接收到 {len(messages)} 条消息")
                     for message in messages:
                         self.process_message(region, message, auto_delete)
+                        messages_consumed += 1
 
-            # 短暂休息
-            time.sleep(2)
+                        # 速率控制：每条消息后检查
+                        if rate:
+                            elapsed = time.time() - start_time
+                            expected = elapsed * rate
+                            if messages_consumed >= expected:
+                                break
 
-        print(f"\n✅ 持续消费完成（运行了 {int(time.time() - start_time)} 秒）")
+            # 短暂休息，避免过于频繁的 API 调用
+            if not rate or messages_consumed < (time.time() - start_time) * rate:
+                time.sleep(0.5)
+
+        elapsed_total = time.time() - start_time
+        actual_rate = messages_consumed / elapsed_total if elapsed_total > 0 else 0
+
+        print(f"\n✅ 持续消费完成")
+        print(f"运行时间: {int(elapsed_total)} 秒")
+        print(f"总消费: {messages_consumed} 条")
+        print(f"实际速率: {actual_rate:.2f} 条/秒")
+        if rate:
+            print(f"目标速率: {rate:.2f} 条/秒")
+            print(f"达成率: {(actual_rate/rate*100):.1f}%")
+
         self.print_stats()
 
     def print_stats(self) -> None:
@@ -303,6 +349,12 @@ def main():
     )
 
     parser.add_argument(
+        "--rate",
+        type=float,
+        help="消费速率（条/秒），仅在 --continuous 模式下有效"
+    )
+
+    parser.add_argument(
         "--no-delete",
         action="store_true",
         help="不自动删除消息（仅查看）"
@@ -331,11 +383,21 @@ def main():
 
     auto_delete = not args.no_delete
 
+    # 速率参数校验
+    if args.rate and not args.continuous:
+        parser.error("--rate 只能在 --continuous 模式下使用")
+
+    if args.rate and args.rate <= 0:
+        parser.error("--rate 必须大于 0")
+
     if args.continuous:
+        if args.rate:
+            print(f"📊 目标消费速率: {args.rate} 条/秒")
         consumer.consume_continuous(
             duration=args.duration,
             max_messages_per_region=args.max_messages,
-            auto_delete=auto_delete
+            auto_delete=auto_delete,
+            rate=args.rate
         )
     else:
         consumer.consume_from_all_regions(

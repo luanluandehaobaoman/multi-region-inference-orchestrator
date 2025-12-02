@@ -199,8 +199,13 @@ def main():
     parser.add_argument(
         "--interval",
         type=float,
-        default=0.5,
-        help="发送间隔秒数（默认: 0.5）"
+        help="发送间隔秒数（与 --rate 互斥，优先级低）"
+    )
+
+    parser.add_argument(
+        "--rate",
+        type=float,
+        help="每秒发送消息数（例如: 10 表示 10 条/秒，与 --interval 互斥）"
     )
 
     parser.add_argument(
@@ -236,6 +241,24 @@ def main():
 
     args = parser.parse_args()
 
+    # 参数校验和计算 interval
+    if args.rate and args.interval:
+        parser.error("--rate 和 --interval 不能同时使用，请只指定一个")
+
+    if args.rate:
+        if args.rate <= 0:
+            parser.error("--rate 必须大于 0")
+        interval = 1.0 / args.rate
+        print(f"📊 速率: {args.rate} 条/秒 (间隔: {interval:.3f}秒)")
+    elif args.interval:
+        interval = args.interval
+        rate = 1.0 / interval if interval > 0 else float('inf')
+        print(f"📊 间隔: {interval}秒 (速率: {rate:.2f} 条/秒)")
+    else:
+        # 默认值：2 条/秒
+        interval = 0.5
+        print(f"📊 使用默认速率: 2 条/秒 (间隔: 0.5秒)")
+
     producer = MessageProducer(args.queue_url, args.profile)
 
     if args.duplicate and args.request_id:
@@ -250,12 +273,12 @@ def main():
             )
             producer.send_message(message)
             if i < args.count - 1:
-                time.sleep(args.interval)
+                time.sleep(interval)
     else:
         # 正常模式
         producer.run_continuous(
             count=args.count,
-            interval=args.interval,
+            interval=interval,
             batch_size=args.batch_size,
             model_name=args.model
         )

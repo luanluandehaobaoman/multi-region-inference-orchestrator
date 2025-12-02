@@ -237,11 +237,13 @@ us-west-1: 3 条 (33.3%)
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `CACHE_TTL` | 60 | 队列负载缓存时间（秒） |
+| `CACHE_TTL` | 10 | 队列负载缓存时间（秒）⚡ 已优化 |
 | `MAX_QUEUE_DEPTH_THRESHOLD` | 5000 | 队列过载阈值（条） |
 | `IDEMPOTENCY_TABLE_NAME` | inference-idempotency-dev | DynamoDB 表名 |
 | `LOG_LEVEL` | INFO | 日志级别 |
 | `REGION_QUEUES` | {...} | Region 到队列 URL 的映射（JSON） |
+
+**注意**: `CACHE_TTL` 已从 60 秒优化为 10 秒，显著改善高吞吐量场景下的负载均衡效果。
 
 ### 关键配置
 

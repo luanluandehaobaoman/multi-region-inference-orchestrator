@@ -46,16 +46,35 @@ python producer.py \
   --interval 1
 ```
 
+#### 高吞吐量测试
+
+```bash
+# 使用 --rate 参数：每秒发送 100 条消息
+python producer.py \
+  --queue-url <MASTER_QUEUE_URL> \
+  --rate 100 \
+  --count 6000
+
+# 等价于 --interval 0.01（但更直观）
+python producer.py \
+  --queue-url <MASTER_QUEUE_URL> \
+  --rate 50 \
+  --count 3000
+```
+
 #### 参数说明
 
 - `--queue-url`: 主队列 URL（必需）
 - `--count`: 发送消息数量（默认: 10）
-- `--interval`: 发送间隔秒数（默认: 0.5）
+- `--interval`: 发送间隔秒数（与 `--rate` 互斥）
+- `--rate`: 每秒发送消息数（与 `--interval` 互斥，优先级高）
 - `--batch-size`: 批量大小 1-10（默认: 1）
 - `--model`: 模型名称（默认: gpt-l-7b）
 - `--profile`: AWS profile（默认: default）
 - `--duplicate`: 发送重复消息（配合 --request-id 使用）
 - `--request-id`: 自定义 request_id
+
+**注意**: `--rate` 和 `--interval` 不能同时使用。如果都不指定，默认速率为 2 条/秒（间隔 0.5秒）。
 
 ### 2. consumer.py - 消息消费者
 
@@ -101,6 +120,28 @@ python consumer.py \
   --export messages.json
 ```
 
+#### 高吞吐量测试（速率控制）
+
+```bash
+# 使用 --rate 参数：每秒消费 100 条消息
+python consumer.py \
+  --queue-us-east-1 <US_EAST_1_QUEUE_URL> \
+  --queue-us-west-2 <US_WEST_2_QUEUE_URL> \
+  --queue-us-west-1 <US_WEST_1_QUEUE_URL> \
+  --continuous \
+  --rate 100 \
+  --duration 60
+
+# 每秒消费 50 条，持续 120 秒
+python consumer.py \
+  --queue-us-east-1 <US_EAST_1_QUEUE_URL> \
+  --queue-us-west-2 <US_WEST_2_QUEUE_URL> \
+  --queue-us-west-1 <US_WEST_1_QUEUE_URL> \
+  --continuous \
+  --rate 50 \
+  --duration 120
+```
+
 #### 参数说明
 
 - `--queue-us-east-1`: US East 1 队列 URL（必需）
@@ -110,9 +151,12 @@ python consumer.py \
 - `--wait-time`: 长轮询等待时间秒数（默认: 5）
 - `--continuous`: 持续消费模式
 - `--duration`: 持续消费时长秒数（默认: 60）
+- `--rate`: 目标消费速率（条/秒），仅在 `--continuous` 模式下有效
 - `--no-delete`: 不自动删除消息
 - `--profile`: AWS profile（默认: default）
 - `--export`: 导出消息到 JSON 文件
+
+**注意**: `--rate` 参数仅在 `--continuous` 模式下有效，用于控制消费速率以模拟真实负载场景。
 
 ## 测试场景
 
@@ -190,6 +234,67 @@ aws dynamodb get-item \
 ```
 
 3. 验证子队列中只有 1 条消息（不是 5 条）
+
+### 场景 4: 高吞吐量负载均衡测试
+
+测试系统在高吞吐量场景下的负载均衡表现。
+
+1. 启动高速生产者（100 条/秒）：
+
+```bash
+python producer.py \
+  --queue-url <MASTER_QUEUE_URL> \
+  --rate 100 \
+  --count 6000
+```
+
+2. 同时启动速率控制的消费者（100 条/秒）：
+
+```bash
+python consumer.py \
+  --queue-us-east-1 <US_EAST_1_QUEUE_URL> \
+  --queue-us-west-2 <US_WEST_2_QUEUE_URL> \
+  --queue-us-west-1 <US_WEST_1_QUEUE_URL> \
+  --continuous \
+  --rate 100 \
+  --duration 60
+```
+
+3. 观察测试结果：
+   - Consumer 显示的实际消费速率
+   - 各 Region 的消息分发比例
+   - 队列堆积情况
+
+4. 检查队列深度：
+
+```bash
+# 检查 us-east-1 队列深度
+aws sqs get-queue-attributes \
+  --queue-url <US_EAST_1_QUEUE_URL> \
+  --attribute-names ApproximateNumberOfMessages \
+  --profile default
+
+# 检查 us-west-2 队列深度
+aws sqs get-queue-attributes \
+  --queue-url <US_WEST_2_QUEUE_URL> \
+  --attribute-names ApproximateNumberOfMessages \
+  --profile default \
+  --region us-west-2
+
+# 检查 us-west-1 队列深度
+aws sqs get-queue-attributes \
+  --queue-url <US_WEST_1_QUEUE_URL> \
+  --attribute-names ApproximateNumberOfMessages \
+  --profile default \
+  --region us-west-1
+```
+
+**预期结果**:
+- 消费速率应接近目标 100 条/秒
+- 各 Region 分发比例应相对均衡
+- 队列堆积应保持在合理范围内（< 500 条）
+
+**注意**: Lambda 的 `CACHE_TTL` 配置会影响负载均衡效果。建议设置为 10 秒以获得更好的均衡性。
 
 ## 获取队列 URL
 
