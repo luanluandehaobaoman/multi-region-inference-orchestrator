@@ -1,0 +1,339 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Multi-Region Inference Orchestrator - 队列分发系统
+
+Globals:
+  Function:
+    Timeout: 300
+    MemorySize: 512
+    Runtime: python3.12
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+    Description: 部署环境
+
+  CacheTTL:
+    Type: Number
+    Default: 60
+    Description: 队列负载缓存时间（秒）
+
+  MaxQueueDepthThreshold:
+    Type: Number
+    Default: 5000
+    Description: 队列过载阈值
+
+  MasterQueueVisibilityTimeout:
+    Type: Number
+    Default: 600
+    Description: 主队列可见性超时（秒），必须大于 Lambda 超时时间
+
+  RegionQueueVisibilityTimeout:
+    Type: Number
+    Default: 3600
+    Description: 子队列可见性超时（秒）
+
+  MaxReceiveCount:
+    Type: Number
+    Default: 3
+    Description: 最大重试次数（进入 DLQ 前）
+
+Resources:
+  # ================================
+  # DynamoDB 幂等性表
+  # ================================
+  IdempotencyTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'inference-idempotency-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: request_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: request_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: inference-orchestrator
+
+  # ================================
+  # 主队列 (Master Queue) - us-east-1
+  # ================================
+  MasterQueueDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'inference-master-dlq-${Environment}'
+      MessageRetentionPeriod: 1209600  # 14 天
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: inference-orchestrator
+
+  MasterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'inference-master-queue-${Environment}'
+      VisibilityTimeout: !Ref MasterQueueVisibilityTimeout
+      MessageRetentionPeriod: 345600  # 4 天
+      ReceiveMessageWaitTimeSeconds: 0  # 短轮询
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt MasterQueueDLQ.Arn
+        maxReceiveCount: !Ref MaxReceiveCount
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: inference-orchestrator
+
+  # ================================
+  # 子队列 - us-east-1
+  # ================================
+  RegionQueueUsEast1DLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'inference-region-dlq-us-east-1-${Environment}'
+      MessageRetentionPeriod: 1209600  # 14 天
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Region
+          Value: us-east-1
+
+  RegionQueueUsEast1:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'inference-queue-us-east-1-${Environment}'
+      VisibilityTimeout: !Ref RegionQueueVisibilityTimeout
+      MessageRetentionPeriod: 1209600  # 14 天
+      ReceiveMessageWaitTimeSeconds: 20  # 长轮询
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt RegionQueueUsEast1DLQ.Arn
+        maxReceiveCount: 2
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Region
+          Value: us-east-1
+
+  # ================================
+  # 子队列 - us-west-2
+  # ================================
+  RegionQueueUsWest2DLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'inference-region-dlq-us-west-2-${Environment}'
+      MessageRetentionPeriod: 1209600  # 14 天
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Region
+          Value: us-west-2
+
+  RegionQueueUsWest2:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'inference-queue-us-west-2-${Environment}'
+      VisibilityTimeout: !Ref RegionQueueVisibilityTimeout
+      MessageRetentionPeriod: 1209600  # 14 天
+      ReceiveMessageWaitTimeSeconds: 20  # 长轮询
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt RegionQueueUsWest2DLQ.Arn
+        maxReceiveCount: 2
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Region
+          Value: us-west-2
+
+  # ================================
+  # 子队列 - us-west-1
+  # ================================
+  RegionQueueUsWest1DLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'inference-region-dlq-us-west-1-${Environment}'
+      MessageRetentionPeriod: 1209600  # 14 天
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Region
+          Value: us-west-1
+
+  RegionQueueUsWest1:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'inference-queue-us-west-1-${Environment}'
+      VisibilityTimeout: !Ref RegionQueueVisibilityTimeout
+      MessageRetentionPeriod: 1209600  # 14 天
+      ReceiveMessageWaitTimeSeconds: 20  # 长轮询
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt RegionQueueUsWest1DLQ.Arn
+        maxReceiveCount: 2
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Region
+          Value: us-west-1
+
+  # ================================
+  # Lambda 函数
+  # ================================
+  DistributorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'inference-distributor-${Environment}'
+      CodeUri: ../src/lambda/distributor/
+      Handler: handler.lambda_handler
+      Description: 智能队列分发函数
+      ReservedConcurrentExecutions: 100
+      Environment:
+        Variables:
+          CACHE_TTL: !Ref CacheTTL
+          MAX_QUEUE_DEPTH_THRESHOLD: !Ref MaxQueueDepthThreshold
+          IDEMPOTENCY_TABLE_NAME: !Ref IdempotencyTable
+          LOG_LEVEL: INFO
+          REGION_QUEUES: !Sub |
+            {
+              "us-east-1": "${RegionQueueUsEast1}",
+              "us-west-2": "${RegionQueueUsWest2}",
+              "us-west-1": "${RegionQueueUsWest1}"
+            }
+      Policies:
+        - SQSPollerPolicy:
+            QueueName: !GetAtt MasterQueue.QueueName
+        - Statement:
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+                - sqs:SendMessageBatch
+                - sqs:GetQueueAttributes
+              Resource:
+                - !GetAtt RegionQueueUsEast1.Arn
+                - !GetAtt RegionQueueUsWest2.Arn
+                - !GetAtt RegionQueueUsWest1.Arn
+            - Effect: Allow
+              Action:
+                - sqs:DeleteMessage
+                - sqs:DeleteMessageBatch
+              Resource:
+                - !GetAtt MasterQueue.Arn
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:GetItem
+              Resource:
+                - !GetAtt IdempotencyTable.Arn
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt MasterQueue.Arn
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 5
+      Tags:
+        Environment: !Ref Environment
+        Service: inference-orchestrator
+
+  # ================================
+  # CloudWatch Log Group
+  # ================================
+  DistributorFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${DistributorFunction}'
+      RetentionInDays: 7
+
+  # ================================
+  # CloudWatch Alarms
+  # ================================
+  DistributorFunctionErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'InferenceDistributor-Errors-${Environment}'
+      AlarmDescription: Lambda 函数错误告警
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref DistributorFunction
+      TreatMissingData: notBreaching
+
+  MasterQueueDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'MasterQueue-DLQ-${Environment}'
+      AlarmDescription: 主队列 DLQ 消息告警
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt MasterQueueDLQ.QueueName
+      TreatMissingData: notBreaching
+
+Outputs:
+  MasterQueueUrl:
+    Description: 主队列 URL
+    Value: !Ref MasterQueue
+    Export:
+      Name: !Sub '${AWS::StackName}-MasterQueueUrl'
+
+  MasterQueueArn:
+    Description: 主队列 ARN
+    Value: !GetAtt MasterQueue.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-MasterQueueArn'
+
+  RegionQueueUsEast1Url:
+    Description: US East 1 子队列 URL
+    Value: !Ref RegionQueueUsEast1
+    Export:
+      Name: !Sub '${AWS::StackName}-RegionQueueUsEast1Url'
+
+  RegionQueueUsWest2Url:
+    Description: US West 2 子队列 URL
+    Value: !Ref RegionQueueUsWest2
+    Export:
+      Name: !Sub '${AWS::StackName}-RegionQueueUsWest2Url'
+
+  RegionQueueUsWest1Url:
+    Description: US West 1 子队列 URL
+    Value: !Ref RegionQueueUsWest1
+    Export:
+      Name: !Sub '${AWS::StackName}-RegionQueueUsWest1Url'
+
+  DistributorFunctionArn:
+    Description: Lambda 函数 ARN
+    Value: !GetAtt DistributorFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-DistributorFunctionArn'
+
+  IdempotencyTableName:
+    Description: DynamoDB 幂等性表名
+    Value: !Ref IdempotencyTable
+    Export:
+      Name: !Sub '${AWS::StackName}-IdempotencyTableName'

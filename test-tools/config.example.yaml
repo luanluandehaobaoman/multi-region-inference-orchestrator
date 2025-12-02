@@ -1,0 +1,27 @@
+# 测试工具配置示例
+# 复制此文件为 config.yaml 并填入实际的队列 URL
+
+# AWS Profile
+aws_profile: default
+
+# 主队列 URL（us-east-1）
+master_queue_url: "https://sqs.us-east-1.amazonaws.com/YOUR_ACCOUNT_ID/inference-master-queue-dev"
+
+# 子队列 URL
+region_queues:
+  us-east-1: "https://sqs.us-east-1.amazonaws.com/YOUR_ACCOUNT_ID/inference-queue-us-east-1-dev"
+  us-west-2: "https://sqs.us-west-2.amazonaws.com/YOUR_ACCOUNT_ID/inference-queue-us-west-2-dev"
+  us-west-1: "https://sqs.us-west-1.amazonaws.com/YOUR_ACCOUNT_ID/inference-queue-us-west-1-dev"
+
+# 生产者配置
+producer:
+  default_count: 10
+  default_interval: 0.5
+  default_batch_size: 1
+  default_model: "gpt-l-7b"
+
+# 消费者配置
+consumer:
+  max_messages: 10
+  wait_time: 5
+  auto_delete: true
